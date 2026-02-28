@@ -33,6 +33,7 @@ go.work.sum
 
 # Local development docs and scratch paths
 .temp/
+build/
 build.md
 phase.md
 coverage
