@@ -14,6 +14,7 @@ import (
 	neturl "net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -74,6 +75,8 @@ type githubAsset struct {
 }
 
 var junctionCreator = createJunction
+var unzipPackage = unzip
+var extractWith7ZipPackage = extractWith7Zip
 
 func NewManager(root string) *Manager {
 	return &Manager{
@@ -158,7 +161,7 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 		return err
 	}
 
-	archivePath := filepath.Join(staging, "package.zip")
+	archivePath := filepath.Join(staging, archiveFileNameFromURL(artifact.URL))
 	_ = m.logEvent(appName, "download", "PKG_DOWNLOAD_BEGIN", "", artifact.URL)
 	if err := m.download(artifact.URL, archivePath); err != nil {
 		state.PendingVersion = ""
@@ -180,7 +183,7 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 	_ = m.logEvent(appName, "verify", "PKG_VERIFY_DONE", "", "sha256 verified")
 
 	extractedRoot := filepath.Join(staging, "extracted")
-	if err := unzip(archivePath, extractedRoot); err != nil {
+	if err := extractPackage(archivePath, extractedRoot); err != nil {
 		state.PendingVersion = ""
 		state.LastErrorCode = ErrCodePkgExtract
 		state.LastErrorMsg = err.Error()
@@ -457,6 +460,55 @@ func verifySHA256(path, expected string) error {
 	return nil
 }
 
+func archiveFileNameFromURL(raw string) string {
+	const defaultName = "package.zip"
+	if strings.TrimSpace(raw) == "" {
+		return defaultName
+	}
+	parsed, err := neturl.Parse(raw)
+	if err != nil {
+		return defaultName
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return defaultName
+	}
+	name := path.Base(parsed.Path)
+	if name == "" || name == "." || name == "/" {
+		return defaultName
+	}
+	return name
+}
+
+func extractPackage(archivePath, dst string) error {
+	name := strings.ToLower(filepath.Base(archivePath))
+	if shouldPrefer7Zip(name) {
+		return extractWith7ZipPackage(archivePath, dst)
+	}
+
+	zipErr := unzipPackage(archivePath, dst)
+	if zipErr == nil {
+		return nil
+	}
+	if strings.EqualFold(filepath.Ext(name), ".zip") {
+		return zipErr
+	}
+	sevenZipErr := extractWith7ZipPackage(archivePath, dst)
+	if sevenZipErr != nil {
+		return fmt.Errorf("extract package failed (zip=%v; 7zip=%w)", zipErr, sevenZipErr)
+	}
+	return nil
+}
+
+func shouldPrefer7Zip(fileName string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(fileName))
+	if !strings.HasSuffix(normalized, ".exe") {
+		return false
+	}
+	return strings.HasSuffix(normalized, "-setup.exe") ||
+		strings.HasSuffix(normalized, "_setup.exe") ||
+		strings.HasSuffix(normalized, "setup.exe")
+}
+
 func unzip(src, dst string) error {
 	r, err := zip.OpenReader(src)
 	if err != nil {
@@ -501,6 +553,49 @@ func unzip(src, dst string) error {
 		rc.Close()
 	}
 	return nil
+}
+
+func extractWith7Zip(src, dst string) error {
+	sevenZipPath, err := find7Zip()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return fmt.Errorf("create extract root: %w", err)
+	}
+
+	cmd := exec.Command(sevenZipPath, "x", "-y", "-o"+dst, src)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("extract with 7-zip failed: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func find7Zip() (string, error) {
+	candidates := []string{"7z", "7zz", "7za"}
+	if runtime.GOOS == "windows" {
+		candidates = []string{"7z.exe", "7z", "7zz.exe", "7zz", "7za.exe", "7za"}
+	}
+	for _, candidate := range candidates {
+		if p, err := exec.LookPath(candidate); err == nil {
+			return p, nil
+		}
+	}
+	if runtime.GOOS == "windows" {
+		for _, key := range []string{"ProgramFiles", "ProgramFiles(x86)"} {
+			base := strings.TrimSpace(os.Getenv(key))
+			if base == "" {
+				continue
+			}
+			candidate := filepath.Join(base, "7-Zip", "7z.exe")
+			info, err := os.Stat(candidate)
+			if err == nil && !info.IsDir() {
+				return candidate, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("7-zip executable not found; install 7-Zip and ensure it is available in PATH")
 }
 
 func switchCurrent(currentPath, versionDir string) error {

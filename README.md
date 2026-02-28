@@ -1,18 +1,22 @@
-﻿# Appstract
+# Appstract
 
 Appstract 是一个面向 Windows 的 JIT 启动与后台更新工具：优先快速启动当前可用版本，再在后台执行更新流程。
 
 ## 功能概览
 
 - 支持初始化标准目录布局。
-- 支持校验应用 Manifest。
-- 支持以前台启动 + 后台异步更新的方式运行应用。
-- 支持按 Manifest 执行更新（可选 checkver、切换确认、更新后重启）。
+- 支持校验 Manifest 文件。
+- 支持 `add`：导入清单并立即安装应用。
+- 支持 `update`：扫描 `manifests/*.json` 批量更新。
+- 支持 `run`：优先启动当前版本，缺安装时自动尝试安装，再后台异步更新。
+- 支持 `help`：输出完整命令说明。
+- 支持对 `*-setup.exe` 安装包使用 7-Zip 解包（常见 NSIS 安装器）。
 
 ## 环境要求
 
 - Windows 11（PowerShell）
 - Go 1.22+
+- 建议安装 7-Zip 并确保命令在 PATH 中（处理 setup 安装包时需要）
 
 ## 快速开始
 
@@ -41,46 +45,75 @@ $env:APPSTRACT_HOME = "D:\Appstract"
 .\build\appstract.exe init
 ```
 
-### 3) 校验 Manifest
+### 3) 导入清单并安装
 
 ```powershell
-.\build\appstract.exe manifest validate D:\Appstract\manifests\myapp.json
+.\build\appstract.exe add --root D:\Appstract D:\Downloads\chrome.json
 ```
 
-### 4) 执行更新
+### 4) 运行应用
 
 ```powershell
-.\build\appstract.exe update --root D:\Appstract --manifest D:\Appstract\manifests\myapp.json myapp
+.\build\appstract.exe run --root D:\Appstract chrome
+```
+
+`run` 命令会：
+
+1. 若 `apps/<app>/current` 不存在，但 `manifests/<app>.json` 存在，则先尝试安装。
+2. 自动安装流程会输出关键提示（开始安装、安装完成）。
+3. 按 Manifest 的 `bin` 启动应用。
+4. 在后台异步触发一次更新流程。
+
+### 5) 批量更新
+
+```powershell
+.\build\appstract.exe update --root D:\Appstract
 ```
 
 启用更多行为：
 
 ```powershell
-.\build\appstract.exe update --root D:\Appstract --manifest D:\Appstract\manifests\myapp.json --checkver --prompt-switch --relaunch myapp
+.\build\appstract.exe update --root D:\Appstract --checkver --prompt-switch --relaunch --fail-fast
 ```
 
-### 5) 运行应用
+### 6) 清单校验
 
 ```powershell
-.\build\appstract.exe run --root D:\Appstract myapp
+.\build\appstract.exe manifest validate D:\Appstract\manifests\chrome.json
 ```
 
-`run` 命令会：
+### 7) 查看帮助
 
-1. 从 `apps/<app>/current` 读取当前版本。
-2. 根据 Manifest 中 `bin` 启动应用。
-3. 在后台异步触发一次更新流程。
+```powershell
+.\build\appstract.exe help
+.\build\appstract.exe help update
+```
 
 ## 命令说明
 
+- `help [command]`
+  - 显示全量命令或单个命令用法。
 - `init [--root <path>]`
-  - 初始化 Appstract 目录结构。
+  - 初始化目录结构与 `config.yaml`。
+- `add [--root <path>] <manifest-file>`
+  - 应用名取清单文件名（如 `chrome.json` -> `chrome`）。
+  - 将清单复制到 `manifests/<app>.json`，随后执行安装。
 - `run [--root <path>] <app>`
-  - 启动 `<app>` 当前版本，并后台更新。
+  - 启动 `apps/<app>/current` 对应程序。
+  - 缺失 current 且存在对应 manifest 时会自动尝试安装。
+- `update [--root <path>] [--checkver] [--prompt-switch] [--relaunch] [--fail-fast]`
+  - 仅扫描并更新 `manifests/` 下已存在清单的软件。
+  - 默认逐个执行并继续后续应用；若有失败，退出码非 0。
+  - `--fail-fast`：遇到第一个失败立即停止。
 - `manifest validate <file>`
   - 解析并校验 Manifest 文件。
-- `update [--root <path>] [--checkver] [--prompt-switch] [--relaunch] --manifest <file> <app>`
-  - 使用 Manifest 更新应用。
+
+## 根目录与初始化规则
+
+- 根目录优先级：`--root` > `APPSTRACT_HOME` > 程序所在目录。
+- `run/add/update` 在执行前会检查目录完整性（`manifests`/`shims`/`scripts`/`apps`）：
+  - 若仅缺少部分目录，会自动修复缺失目录。
+  - 若目录仅包含程序本体（或等价空目录），会提示先执行 `init`。
 
 ## 目录结构
 
@@ -89,7 +122,7 @@ $env:APPSTRACT_HOME = "D:\Appstract"
 ├─ cmd/
 │  └─ appstract/            # 程序入口
 ├─ internal/
-│  ├─ bootstrap/            # 根目录解析与初始化
+│  ├─ bootstrap/            # 根目录解析、初始化与工作区检查
 │  ├─ cli/                  # CLI 命令分发
 │  ├─ config/               # 配置加载
 │  ├─ manifest/             # Manifest 解析与校验
@@ -100,11 +133,6 @@ $env:APPSTRACT_HOME = "D:\Appstract"
 ├─ build/                   # 构建产物目录
 └─ README.md
 ```
-
-## 配置与路径约定
-
-- 根目录优先级：命令行 `--root` > 环境变量 `APPSTRACT_HOME` > 默认用户目录策略（由 `bootstrap` 模块解析）。
-- 更新器会读取全局配置（如版本保留数量）并用于清理旧版本。
 
 ## 开发与测试
 
@@ -118,9 +146,3 @@ go test ./...
 go test ./... -coverprofile coverage.out
 go tool cover -func coverage.out
 ```
-
-## 注意事项
-
-- `run` 要求目标应用存在 `apps/<app>/current`。
-- `run` 依赖对应 Manifest 可被正确解析，且 `bin` 指向有效可执行文件。
-- 后台更新失败不会阻断当前进程启动，错误会输出到标准错误流。

@@ -935,6 +935,96 @@ func TestLockFileIsStale_PIDCheckError(t *testing.T) {
 	}
 }
 
+func TestArchiveFileNameFromURL(t *testing.T) {
+	got := archiveFileNameFromURL("https://example.com/release/Antigravity.Tools_4.1.26_x64-setup.exe")
+	if got != "Antigravity.Tools_4.1.26_x64-setup.exe" {
+		t.Fatalf("unexpected file name: %s", got)
+	}
+	got = archiveFileNameFromURL("https://example.com/download")
+	if got != "download" {
+		t.Fatalf("unexpected fallback basename: %s", got)
+	}
+	got = archiveFileNameFromURL("not a url")
+	if got != "package.zip" {
+		t.Fatalf("expected default package.zip, got: %s", got)
+	}
+}
+
+func TestShouldPrefer7Zip(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{name: "a-setup.exe", want: true},
+		{name: "a_setup.exe", want: true},
+		{name: "Setup.exe", want: true},
+		{name: "plain.exe", want: false},
+		{name: "pkg.zip", want: false},
+	}
+	for _, tc := range cases {
+		if got := shouldPrefer7Zip(tc.name); got != tc.want {
+			t.Fatalf("shouldPrefer7Zip(%q)=%v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestExtractPackagePrefers7ZipForSetupExe(t *testing.T) {
+	oldUnzip := unzipPackage
+	old7z := extractWith7ZipPackage
+	t.Cleanup(func() {
+		unzipPackage = oldUnzip
+		extractWith7ZipPackage = old7z
+	})
+
+	unzipCalled := false
+	sevenZipCalled := false
+	unzipPackage = func(src, dst string) error {
+		unzipCalled = true
+		return nil
+	}
+	extractWith7ZipPackage = func(src, dst string) error {
+		sevenZipCalled = true
+		return nil
+	}
+
+	if err := extractPackage("/tmp/app-setup.exe", "/tmp/out"); err != nil {
+		t.Fatalf("extractPackage failed: %v", err)
+	}
+	if unzipCalled {
+		t.Fatal("expected setup exe to skip unzip path")
+	}
+	if !sevenZipCalled {
+		t.Fatal("expected setup exe to use 7zip extraction")
+	}
+}
+
+func TestExtractPackageFallbackTo7ZipForNonZip(t *testing.T) {
+	oldUnzip := unzipPackage
+	old7z := extractWith7ZipPackage
+	t.Cleanup(func() {
+		unzipPackage = oldUnzip
+		extractWith7ZipPackage = old7z
+	})
+
+	unzipCalls := 0
+	sevenZipCalls := 0
+	unzipPackage = func(src, dst string) error {
+		unzipCalls++
+		return fmt.Errorf("open zip: invalid")
+	}
+	extractWith7ZipPackage = func(src, dst string) error {
+		sevenZipCalls++
+		return nil
+	}
+
+	if err := extractPackage("/tmp/app.exe", "/tmp/out"); err != nil {
+		t.Fatalf("extractPackage failed: %v", err)
+	}
+	if unzipCalls != 1 || sevenZipCalls != 1 {
+		t.Fatalf("expected unzip then 7zip fallback, got unzip=%d 7zip=%d", unzipCalls, sevenZipCalls)
+	}
+}
+
 func buildZip(t *testing.T, files map[string]string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
