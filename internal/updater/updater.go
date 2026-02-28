@@ -51,6 +51,7 @@ type Manager struct {
 	closePID func(pid int) error
 	killPID  func(pid int, force bool) error
 	launch   func(path string) error
+	confirm  func(appName, version string) (bool, error)
 }
 
 type switchLogEvent struct {
@@ -89,6 +90,7 @@ func NewManager(root string) *Manager {
 		closePID:      gracefulCloseByPID,
 		killPID:       killProcessByPID,
 		launch:        launchDetached,
+		confirm:       winui.ConfirmUpdateReady,
 	}
 }
 
@@ -128,10 +130,14 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 	defer releaseLock(lockPath)
 
 	statePath := filepath.Join(m.Root, "apps", appName, "runtime.json")
-	state, _ := loadState(statePath)
+	state, err := loadState(statePath)
+	if err != nil {
+		return err
+	}
 	state.LastCheckAt = m.Now().UTC().Format(time.RFC3339)
 
 	if state.CurrentVersion == effective.Version && state.CurrentVersion != "" {
+		state.PendingVersion = ""
 		if err := saveState(statePath, state); err != nil {
 			return err
 		}
@@ -155,6 +161,7 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 	archivePath := filepath.Join(staging, "package.zip")
 	_ = m.logEvent(appName, "download", "PKG_DOWNLOAD_BEGIN", "", artifact.URL)
 	if err := m.download(artifact.URL, archivePath); err != nil {
+		state.PendingVersion = ""
 		state.LastErrorCode = ErrCodePkgDownload
 		state.LastErrorMsg = err.Error()
 		_ = m.logEvent(appName, "download", "PKG_DOWNLOAD_FAILED", state.LastErrorCode, err.Error())
@@ -163,6 +170,7 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 	}
 	_ = m.logEvent(appName, "download", "PKG_DOWNLOAD_DONE", "", archivePath)
 	if err := verifySHA256(archivePath, artifact.Hash); err != nil {
+		state.PendingVersion = ""
 		state.LastErrorCode = ErrCodePkgVerify
 		state.LastErrorMsg = err.Error()
 		_ = m.logEvent(appName, "verify", "PKG_VERIFY_FAILED", state.LastErrorCode, err.Error())
@@ -173,6 +181,7 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 
 	extractedRoot := filepath.Join(staging, "extracted")
 	if err := unzip(archivePath, extractedRoot); err != nil {
+		state.PendingVersion = ""
 		state.LastErrorCode = ErrCodePkgExtract
 		state.LastErrorMsg = err.Error()
 		_ = m.logEvent(appName, "extract", "PKG_EXTRACT_FAILED", state.LastErrorCode, err.Error())
@@ -190,6 +199,7 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 	}
 	_ = m.logEvent(appName, "script", "SCRIPT_PREINSTALL_BEGIN", "", "running pre_install hooks")
 	if err := m.runPreInstall(appName, sourceDir, effective.PreInstall); err != nil {
+		state.PendingVersion = ""
 		state.LastErrorCode = ErrCodeScriptPreInstall
 		state.LastErrorMsg = err.Error()
 		_ = m.logEvent(appName, "script", "SCRIPT_PREINSTALL_FAILED", state.LastErrorCode, err.Error())
@@ -208,19 +218,27 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 	currentPath := filepath.Join(m.Root, "apps", appName, "current")
 	prevTarget, _ := resolveCurrentTarget(currentPath)
 	if m.PromptSwitch {
-		approved, err := winui.ConfirmUpdateReady(appName, effective.Version)
+		confirmFn := m.confirm
+		if confirmFn == nil {
+			confirmFn = winui.ConfirmUpdateReady
+		}
+		approved, err := confirmFn(appName, effective.Version)
 		if err != nil {
+			state.PendingVersion = ""
 			state.LastErrorCode = ErrCodeSwitchPrompt
 			state.LastErrorMsg = err.Error()
 			_ = saveState(statePath, state)
 			return err
 		}
 		if !approved {
+			state.PendingVersion = ""
+			_ = m.logEvent(appName, "switch", "SWITCH_USER_DECLINED", "", "user declined immediate switch")
 			return saveState(statePath, state)
 		}
 	}
 	_ = m.logEvent(appName, "switch", "SWITCH_PROCESS_BEGIN", "", "begin process stop for current path")
 	if err := m.terminateProcesses(appName, currentPath); err != nil {
+		state.PendingVersion = ""
 		state.LastErrorCode = ErrCodeSwitchProcess
 		state.LastErrorMsg = err.Error()
 		_ = m.logEvent(appName, "switch", "SWITCH_PROCESS_FAILED", state.LastErrorCode, err.Error())
@@ -229,6 +247,7 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 	}
 	_ = m.logEvent(appName, "switch", "SWITCH_PROCESS_DONE", "", "target processes stopped")
 	if err := switchCurrent(currentPath, versionDir); err != nil {
+		state.PendingVersion = ""
 		state.LastErrorCode = ErrCodeSwitchCurrent
 		state.LastErrorMsg = err.Error()
 		_ = m.logEvent(appName, "switch", "SWITCH_CURRENT_FAILED", state.LastErrorCode, err.Error())
@@ -238,6 +257,7 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 	_ = m.logEvent(appName, "switch", "SWITCH_CURRENT_DONE", "", "current version switched")
 	if err := m.healthcheckAndRelaunch(currentPath, effective.Bin); err != nil {
 		rollbackErr := rollbackCurrent(currentPath, prevTarget)
+		state.PendingVersion = ""
 		state.LastErrorCode = ErrCodeSwitchHealthcheck
 		state.LastErrorMsg = err.Error()
 		_ = m.logEvent(appName, "healthcheck", "SWITCH_HEALTHCHECK_FAILED", state.LastErrorCode, err.Error())
@@ -390,6 +410,13 @@ func (m *Manager) DiscoverLatest(man *manifest.Manifest) (string, map[string]str
 }
 
 func (m *Manager) download(url, dst string) error {
+	parsed, err := neturl.Parse(url)
+	if err != nil {
+		return fmt.Errorf("%s: invalid download url: %w", ErrCodeNetDownload, err)
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") {
+		return fmt.Errorf("%s: insecure download url scheme %q", ErrCodeNetDownload, parsed.Scheme)
+	}
 	resp, err := m.Client.Get(url)
 	if err != nil {
 		return fmt.Errorf("%s: download request: %w", ErrCodeNetDownload, err)
@@ -757,13 +784,19 @@ func (m *Manager) terminateProcesses(appName, prefix string) error {
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		remain, _ := m.findPIDs(prefix)
+		remain, err := m.findPIDs(prefix)
+		if err != nil {
+			return fmt.Errorf("%s: query remaining processes: %w", ErrCodeSwitchProcess, err)
+		}
 		if len(remain) == 0 {
 			return nil
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	remain, _ := m.findPIDs(prefix)
+	remain, err := m.findPIDs(prefix)
+	if err != nil {
+		return fmt.Errorf("%s: query remaining processes: %w", ErrCodeSwitchProcess, err)
+	}
 	for _, pid := range remain {
 		if err := m.killPID(pid, true); err != nil {
 			_ = m.logEvent(appName, "process", "SWITCH_PROCESS_FORCE_FAILED", ErrCodeSwitchProcess, err.Error())

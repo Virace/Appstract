@@ -28,7 +28,7 @@ func TestUpdateFromManifest_Success(t *testing.T) {
 		"aria2-1.37.0-win-64bit-build1/aria2c.exe": "binary",
 	})
 	hash := sha256Hex(zipData)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(zipData)
 	}))
 	defer server.Close()
@@ -50,6 +50,7 @@ func TestUpdateFromManifest_Success(t *testing.T) {
 	}
 
 	mgr := NewManager(root)
+	mgr.Client = server.Client()
 	mgr.Now = func() time.Time { return time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC) }
 	if err := mgr.UpdateFromManifest(appName, manifestPath); err != nil {
 		t.Fatalf("UpdateFromManifest failed: %v", err)
@@ -86,7 +87,7 @@ func TestUpdateFromManifest_HashMismatch(t *testing.T) {
 	zipData := buildZip(t, map[string]string{
 		"aria2-1.37.0-win-64bit-build1/aria2c.exe": "binary",
 	})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(zipData)
 	}))
 	defer server.Close()
@@ -104,6 +105,7 @@ func TestUpdateFromManifest_HashMismatch(t *testing.T) {
 	}
 
 	mgr := NewManager(root)
+	mgr.Client = server.Client()
 	err := mgr.Update(appName, man)
 	if err == nil {
 		t.Fatal("expected hash mismatch error")
@@ -119,6 +121,9 @@ func TestUpdateFromManifest_HashMismatch(t *testing.T) {
 	}
 	if state.LastErrorCode != ErrCodePkgVerify {
 		t.Fatalf("expected %s, got %s", ErrCodePkgVerify, state.LastErrorCode)
+	}
+	if state.PendingVersion != "" {
+		t.Fatalf("expected empty pending version on failure, got %q", state.PendingVersion)
 	}
 }
 
@@ -224,7 +229,7 @@ func TestUpdateWithCheckverRejectsUnverifiableNewVersion(t *testing.T) {
 func TestUpdate_DownloadHTTPFailureSetsPkgDownload(t *testing.T) {
 	root := t.TempDir()
 	appName := "aria2"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
 	defer server.Close()
@@ -242,6 +247,7 @@ func TestUpdate_DownloadHTTPFailureSetsPkgDownload(t *testing.T) {
 	}
 
 	mgr := NewManager(root)
+	mgr.Client = server.Client()
 	err := mgr.Update(appName, man)
 	if err == nil || !strings.Contains(err.Error(), ErrCodeNetDownload) {
 		t.Fatalf("expected NET_DOWNLOAD failure, got: %v", err)
@@ -258,6 +264,44 @@ func TestUpdate_DownloadHTTPFailureSetsPkgDownload(t *testing.T) {
 	if state.LastErrorCode != ErrCodePkgDownload {
 		t.Fatalf("expected %s, got %s", ErrCodePkgDownload, state.LastErrorCode)
 	}
+	if state.PendingVersion != "" {
+		t.Fatalf("expected empty pending version on failure, got %q", state.PendingVersion)
+	}
+}
+
+func TestDownloadRejectsHTTPURL(t *testing.T) {
+	mgr := NewManager(t.TempDir())
+	err := mgr.download("http://example.com/pkg.zip", filepath.Join(t.TempDir(), "pkg.zip"))
+	if err == nil || !strings.Contains(err.Error(), "insecure download url scheme") {
+		t.Fatalf("expected insecure download url error, got: %v", err)
+	}
+}
+
+func TestUpdateFailsWhenRuntimeStateCorrupted(t *testing.T) {
+	root := t.TempDir()
+	appName := "aria2"
+	statePath := filepath.Join(root, "apps", appName, "runtime.json")
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(statePath, []byte("{bad-json"), 0o644); err != nil {
+		t.Fatalf("write state failed: %v", err)
+	}
+	man := &manifest.Manifest{
+		Version: "1.37.0-1",
+		Architecture: manifest.Architecture{
+			X64: manifest.Artifact{
+				URL:  "https://example.com/aria2.zip",
+				Hash: "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288",
+			},
+		},
+		Bin: "aria2c.exe",
+	}
+	mgr := NewManager(root)
+	err := mgr.Update(appName, man)
+	if err == nil || !strings.Contains(err.Error(), "decode runtime state") {
+		t.Fatalf("expected runtime state decode error, got: %v", err)
+	}
 }
 
 func TestUpdate_CorruptArchiveSetsPkgExtract(t *testing.T) {
@@ -267,7 +311,7 @@ func TestUpdate_CorruptArchiveSetsPkgExtract(t *testing.T) {
 	sum := sha256.Sum256(corrupt)
 	hash := hex.EncodeToString(sum[:])
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(w, bytes.NewReader(corrupt))
 	}))
 	defer server.Close()
@@ -284,6 +328,7 @@ func TestUpdate_CorruptArchiveSetsPkgExtract(t *testing.T) {
 		Bin: "aria2c.exe",
 	}
 	mgr := NewManager(root)
+	mgr.Client = server.Client()
 	err := mgr.Update(appName, man)
 	if err == nil || !strings.Contains(err.Error(), "open zip") {
 		t.Fatalf("expected zip open error, got: %v", err)
@@ -334,7 +379,7 @@ func TestUpdate_PreInstallSuccess(t *testing.T) {
 		"aria2-1.37.0-win-64bit-build1/aria2c.exe": "binary",
 	})
 	hash := sha256Hex(zipData)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(zipData)
 	}))
 	defer server.Close()
@@ -355,6 +400,7 @@ func TestUpdate_PreInstallSuccess(t *testing.T) {
 	}
 
 	mgr := NewManager(root)
+	mgr.Client = server.Client()
 	if err := mgr.Update(appName, man); err != nil {
 		t.Fatalf("Update failed: %v", err)
 	}
@@ -372,7 +418,7 @@ func TestUpdate_PreInstallFailure(t *testing.T) {
 		"aria2-1.37.0-win-64bit-build1/aria2c.exe": "binary",
 	})
 	hash := sha256Hex(zipData)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(zipData)
 	}))
 	defer server.Close()
@@ -393,6 +439,7 @@ func TestUpdate_PreInstallFailure(t *testing.T) {
 	}
 
 	mgr := NewManager(root)
+	mgr.Client = server.Client()
 	err := mgr.Update(appName, man)
 	if err == nil || !strings.Contains(err.Error(), "pre_install failed") {
 		t.Fatalf("expected pre_install failed, got: %v", err)
@@ -409,12 +456,65 @@ func TestUpdate_PreInstallFailure(t *testing.T) {
 	if state.LastErrorCode != ErrCodeScriptPreInstall {
 		t.Fatalf("expected %s, got %s", ErrCodeScriptPreInstall, state.LastErrorCode)
 	}
+	if state.PendingVersion != "" {
+		t.Fatalf("expected empty pending version on failure, got %q", state.PendingVersion)
+	}
 	logs, err := filepath.Glob(filepath.Join(root, "apps", appName, "logs", "preinstall-*.log"))
 	if err != nil {
 		t.Fatalf("glob logs failed: %v", err)
 	}
 	if len(logs) == 0 {
 		t.Fatal("expected preinstall log file")
+	}
+}
+
+func TestUpdate_PromptDeclinedClearsPendingVersion(t *testing.T) {
+	root := t.TempDir()
+	appName := "aria2"
+
+	zipData := buildZip(t, map[string]string{
+		"aria2-1.37.0-win-64bit-build1/aria2c.exe": "binary",
+	})
+	hash := sha256Hex(zipData)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(zipData)
+	}))
+	defer server.Close()
+
+	man := &manifest.Manifest{
+		Version: "1.37.0-1",
+		Architecture: manifest.Architecture{
+			X64: manifest.Artifact{
+				URL:        server.URL + "/aria2.zip",
+				Hash:       hash,
+				ExtractDir: "aria2-1.37.0-win-64bit-build1",
+			},
+		},
+		Bin: "aria2c.exe",
+	}
+
+	mgr := NewManager(root)
+	mgr.Client = server.Client()
+	mgr.PromptSwitch = true
+	mgr.confirm = func(appName, version string) (bool, error) { return false, nil }
+	if err := mgr.Update(appName, man); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	statePath := filepath.Join(root, "apps", appName, "runtime.json")
+	stateBytes, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read runtime state: %v", err)
+	}
+	var state RuntimeState
+	if err := json.Unmarshal(stateBytes, &state); err != nil {
+		t.Fatalf("decode runtime state: %v", err)
+	}
+	if state.PendingVersion != "" {
+		t.Fatalf("expected empty pending version, got %q", state.PendingVersion)
+	}
+	if state.CurrentVersion != "" {
+		t.Fatalf("expected current version unchanged, got %q", state.CurrentVersion)
 	}
 }
 
@@ -434,7 +534,7 @@ func TestUpdate_CleanupOldVersions(t *testing.T) {
 		"aria2-1.37.0-win-64bit-build1/aria2c.exe": "binary",
 	})
 	hash := sha256Hex(zipData)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(zipData)
 	}))
 	defer server.Close()
@@ -452,6 +552,7 @@ func TestUpdate_CleanupOldVersions(t *testing.T) {
 	}
 
 	mgr := NewManager(root)
+	mgr.Client = server.Client()
 	mgr.KeepVersions = 1
 	if err := mgr.Update(appName, man); err != nil {
 		t.Fatalf("Update failed: %v", err)
@@ -536,7 +637,7 @@ func TestUpdate_RollbackOnRelaunchFailure(t *testing.T) {
 		"aria2-1.37.0-win-64bit-build1/aria2c.exe": "new",
 	})
 	hash := sha256Hex(zipData)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(zipData)
 	}))
 	defer server.Close()
@@ -554,6 +655,7 @@ func TestUpdate_RollbackOnRelaunchFailure(t *testing.T) {
 	}
 
 	mgr := NewManager(root)
+	mgr.Client = server.Client()
 	mgr.Relaunch = true
 	mgr.findPIDs = func(prefix string) ([]int, error) { return nil, nil }
 	mgr.killPID = func(pid int, force bool) error { return nil }
@@ -629,6 +731,27 @@ func TestTerminateProcesses_GracefulThenForce(t *testing.T) {
 	}
 }
 
+func TestTerminateProcesses_FailsOnPollError(t *testing.T) {
+	mgr := NewManager(t.TempDir())
+	mgr.StopTimeout = 200 * time.Millisecond
+
+	call := 0
+	mgr.findPIDs = func(prefix string) ([]int, error) {
+		call++
+		if call == 1 {
+			return []int{100}, nil
+		}
+		return nil, fmt.Errorf("query failed")
+	}
+	mgr.closePID = func(pid int) error { return nil }
+	mgr.killPID = func(pid int, force bool) error { return nil }
+
+	err := mgr.terminateProcesses("aria2", `C:\apps\aria2\current`)
+	if err == nil || !strings.Contains(err.Error(), ErrCodeSwitchProcess) {
+		t.Fatalf("expected switch process error, got: %v", err)
+	}
+}
+
 func TestUpdate_WritesSwitchLog(t *testing.T) {
 	root := t.TempDir()
 	appName := "aria2"
@@ -637,7 +760,7 @@ func TestUpdate_WritesSwitchLog(t *testing.T) {
 		"aria2-1.37.0-win-64bit-build1/aria2c.exe": "binary",
 	})
 	hash := sha256Hex(zipData)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(zipData)
 	}))
 	defer server.Close()
@@ -655,6 +778,7 @@ func TestUpdate_WritesSwitchLog(t *testing.T) {
 	}
 
 	mgr := NewManager(root)
+	mgr.Client = server.Client()
 	mgr.Now = func() time.Time { return time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC) }
 	mgr.findPIDs = func(prefix string) ([]int, error) { return nil, nil }
 	mgr.closePID = func(pid int) error { return nil }
