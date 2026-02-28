@@ -10,11 +10,34 @@ import (
 
 type Config struct {
 	KeepVersions int
+	OutputLevel  OutputLevel
 }
 
 func Default() Config {
 	return Config{
 		KeepVersions: 2,
+		OutputLevel:  OutputLevelDefault,
+	}
+}
+
+type OutputLevel string
+
+const (
+	OutputLevelSilent  OutputLevel = "silent"
+	OutputLevelDefault OutputLevel = "default"
+	OutputLevelDebug   OutputLevel = "debug"
+)
+
+func ParseOutputLevel(raw string) (OutputLevel, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case string(OutputLevelSilent), "quiet", "none", "off", "error":
+		return OutputLevelSilent, true
+	case string(OutputLevelDefault), "normal", "info":
+		return OutputLevelDefault, true
+	case string(OutputLevelDebug), "verbose", "trace":
+		return OutputLevelDebug, true
+	default:
+		return OutputLevelDefault, false
 	}
 }
 
@@ -30,6 +53,7 @@ func Load(root string) (Config, error) {
 	}
 	defer f.Close()
 
+	outputConfigured := false
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -46,6 +70,19 @@ func Load(root string) (Config, error) {
 		case "keep_versions":
 			if n, convErr := strconv.Atoi(val); convErr == nil && n >= 0 {
 				cfg.KeepVersions = n
+			}
+		case "output_level":
+			if level, ok := ParseOutputLevel(val); ok {
+				cfg.OutputLevel = level
+				outputConfigured = true
+			}
+		case "log_level":
+			// Backward compatibility for historical config key.
+			if outputConfigured {
+				continue
+			}
+			if level, ok := ParseOutputLevel(val); ok {
+				cfg.OutputLevel = level
 			}
 		}
 	}

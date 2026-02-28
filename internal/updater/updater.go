@@ -47,12 +47,29 @@ type Manager struct {
 	PromptSwitch  bool
 	Relaunch      bool
 	StopTimeout   time.Duration
+	OnMessage     func(level MessageLevel, msg string)
+	OnProgress    func(progress DownloadProgress)
 
 	findPIDs func(prefix string) ([]int, error)
 	closePID func(pid int) error
 	killPID  func(pid int, force bool) error
 	launch   func(path string) error
 	confirm  func(appName, version string) (bool, error)
+}
+
+type MessageLevel int
+
+const (
+	MessageLevelDefault MessageLevel = iota
+	MessageLevelDebug
+)
+
+type DownloadProgress struct {
+	AppName    string
+	URL        string
+	Downloaded int64
+	Total      int64
+	Done       bool
 }
 
 type switchLogEvent struct {
@@ -124,6 +141,8 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 	if err != nil {
 		return err
 	}
+	m.report(MessageLevelDefault, "update start: app=%s version=%s", appName, effective.Version)
+	m.report(MessageLevelDebug, "artifact url=%s", artifact.URL)
 	_ = m.logEvent(appName, "update", "UPDATE_BEGIN", "", "update transaction started")
 
 	lockPath := filepath.Join(m.Root, "apps", appName, ".lock")
@@ -147,8 +166,8 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 		return m.cleanupOldVersions(appName, effective.Version)
 	}
 
-	staging := filepath.Join(m.Root, "apps", appName, "_staging", "v"+effective.Version)
-	versionDir := filepath.Join(m.Root, "apps", appName, "v"+effective.Version)
+	staging := filepath.Join(m.Root, "apps", appName, "_staging", effective.Version)
+	versionDir := filepath.Join(m.Root, "apps", appName, effective.Version)
 	if err := os.RemoveAll(staging); err != nil {
 		return fmt.Errorf("cleanup old staging: %w", err)
 	}
@@ -162,8 +181,9 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 	}
 
 	archivePath := filepath.Join(staging, archiveFileNameFromURL(artifact.URL))
+	m.report(MessageLevelDefault, "downloading package: %s", filepath.Base(archivePath))
 	_ = m.logEvent(appName, "download", "PKG_DOWNLOAD_BEGIN", "", artifact.URL)
-	if err := m.download(artifact.URL, archivePath); err != nil {
+	if err := m.download(appName, artifact.URL, archivePath); err != nil {
 		state.PendingVersion = ""
 		state.LastErrorCode = ErrCodePkgDownload
 		state.LastErrorMsg = err.Error()
@@ -171,7 +191,9 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 		_ = saveState(statePath, state)
 		return err
 	}
+	m.report(MessageLevelDefault, "[ok] download complete: %s", filepath.Base(archivePath))
 	_ = m.logEvent(appName, "download", "PKG_DOWNLOAD_DONE", "", archivePath)
+	m.report(MessageLevelDefault, "verifying package hash...")
 	if err := verifySHA256(archivePath, artifact.Hash); err != nil {
 		state.PendingVersion = ""
 		state.LastErrorCode = ErrCodePkgVerify
@@ -180,9 +202,11 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 		_ = saveState(statePath, state)
 		return err
 	}
+	m.report(MessageLevelDefault, "[ok] hash verify complete")
 	_ = m.logEvent(appName, "verify", "PKG_VERIFY_DONE", "", "sha256 verified")
 
 	extractedRoot := filepath.Join(staging, "extracted")
+	m.report(MessageLevelDefault, "extracting package...")
 	if err := extractPackage(archivePath, extractedRoot); err != nil {
 		state.PendingVersion = ""
 		state.LastErrorCode = ErrCodePkgExtract
@@ -191,6 +215,7 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 		_ = saveState(statePath, state)
 		return err
 	}
+	m.report(MessageLevelDefault, "[ok] extract complete")
 	_ = m.logEvent(appName, "extract", "PKG_EXTRACT_DONE", "", extractedRoot)
 
 	sourceDir := extractedRoot
@@ -201,6 +226,7 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 		return fmt.Errorf("source extract directory missing: %w", err)
 	}
 	_ = m.logEvent(appName, "script", "SCRIPT_PREINSTALL_BEGIN", "", "running pre_install hooks")
+	m.report(MessageLevelDefault, "running pre_install scripts...")
 	if err := m.runPreInstall(appName, sourceDir, effective.PreInstall); err != nil {
 		state.PendingVersion = ""
 		state.LastErrorCode = ErrCodeScriptPreInstall
@@ -209,6 +235,7 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 		_ = saveState(statePath, state)
 		return err
 	}
+	m.report(MessageLevelDefault, "[ok] pre_install scripts complete")
 	_ = m.logEvent(appName, "script", "SCRIPT_PREINSTALL_DONE", "", "pre_install completed")
 
 	if err := os.RemoveAll(versionDir); err != nil {
@@ -277,6 +304,7 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 		return err
 	}
 	_ = m.logEvent(appName, "healthcheck", "SWITCH_HEALTHCHECK_DONE", "", "healthcheck passed")
+	m.report(MessageLevelDefault, "[ok] switch complete: app=%s version=%s", appName, effective.Version)
 
 	state.CurrentVersion = effective.Version
 	state.PendingVersion = ""
@@ -292,7 +320,28 @@ func (m *Manager) Update(appName string, man *manifest.Manifest) error {
 	}
 	_ = m.logEvent(appName, "switch", "SWITCH_DONE", "", "update switch transaction completed")
 	_ = m.logEvent(appName, "update", "UPDATE_DONE", "", "update transaction completed")
+	m.report(MessageLevelDefault, "[ok] update done: app=%s version=%s", appName, effective.Version)
 	return os.RemoveAll(filepath.Join(m.Root, "apps", appName, "_staging"))
+}
+
+func (m *Manager) report(level MessageLevel, format string, args ...any) {
+	if m.OnMessage == nil {
+		return
+	}
+	m.OnMessage(level, fmt.Sprintf(format, args...))
+}
+
+func (m *Manager) reportProgress(appName, url string, downloaded, total int64, done bool) {
+	if m.OnProgress == nil {
+		return
+	}
+	m.OnProgress(DownloadProgress{
+		AppName:    appName,
+		URL:        url,
+		Downloaded: downloaded,
+		Total:      total,
+		Done:       done,
+	})
 }
 
 func (m *Manager) logEvent(appName, stage, event, errorCode, message string) error {
@@ -412,7 +461,7 @@ func (m *Manager) DiscoverLatest(man *manifest.Manifest) (string, map[string]str
 	return "", nil, fmt.Errorf("checkver found no matching release assets")
 }
 
-func (m *Manager) download(url, dst string) error {
+func (m *Manager) download(appName, url, dst string) error {
 	parsed, err := neturl.Parse(url)
 	if err != nil {
 		return fmt.Errorf("%s: invalid download url: %w", ErrCodeNetDownload, err)
@@ -436,9 +485,33 @@ func (m *Manager) download(url, dst string) error {
 		return fmt.Errorf("create download file: %w", err)
 	}
 	defer f.Close()
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		return fmt.Errorf("write download file: %w", err)
+
+	total := resp.ContentLength
+	var downloaded int64
+	m.reportProgress(appName, url, 0, total, false)
+	lastReportAt := time.Now()
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := f.Write(buf[:n]); writeErr != nil {
+				return fmt.Errorf("write download file: %w", writeErr)
+			}
+			downloaded += int64(n)
+			if time.Since(lastReportAt) >= 150*time.Millisecond {
+				m.reportProgress(appName, url, downloaded, total, false)
+				lastReportAt = time.Now()
+			}
+		}
+		if readErr == nil {
+			continue
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		return fmt.Errorf("write download file: %w", readErr)
 	}
+	m.reportProgress(appName, url, downloaded, total, true)
 	return nil
 }
 
@@ -952,14 +1025,14 @@ func (m *Manager) cleanupOldVersions(appName, currentVersion string) error {
 		modTime time.Time
 	}
 	var old []versionEntry
-	currentDirName := "v" + currentVersion
+	currentDirName := currentVersion
 
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		name := e.Name()
-		if !strings.HasPrefix(name, "v") || name == currentDirName {
+		if name == currentDirName || name == "current" || name == "_staging" || name == "logs" {
 			continue
 		}
 		info, infoErr := e.Info()

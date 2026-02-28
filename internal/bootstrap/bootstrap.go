@@ -29,6 +29,7 @@ const defaultConfigYAML = `github_token: ""
 proxy: ""
 check_ttl_seconds: 3600
 keep_versions: 2
+output_level: "default"
 download_timeout_seconds: 120
 max_retry: 3
 log_level: "info"

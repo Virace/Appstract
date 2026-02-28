@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"appstract/internal/bootstrap"
+	"appstract/internal/updater"
 )
 
 func TestExecuteNoArgs(t *testing.T) {
@@ -153,7 +154,7 @@ func TestExecuteRunReadyWhenCurrentExists(t *testing.T) {
 
 	done := make(chan struct{})
 	oldAsync := runAsyncUpdate
-	runAsyncUpdate = func(runRoot, app, manifestPath string) error {
+	runAsyncUpdate = func(runRoot, app, manifestPath string, opts updateOptions) error {
 		if runRoot != root || app != "chrome" {
 			t.Fatalf("unexpected async update args: root=%s app=%s", runRoot, app)
 		}
@@ -216,7 +217,7 @@ func TestExecuteRunAttemptsInstallWhenCurrentMissing(t *testing.T) {
 
 	done := make(chan struct{})
 	oldAsync := runAsyncUpdate
-	runAsyncUpdate = func(runRoot, app, path string) error {
+	runAsyncUpdate = func(runRoot, app, path string, opts updateOptions) error {
 		close(done)
 		return nil
 	}
@@ -343,7 +344,7 @@ func TestExecuteRunLaunchSuccessEvenIfBackgroundUpdateFails(t *testing.T) {
 
 	done := make(chan struct{})
 	oldAsync := runAsyncUpdate
-	runAsyncUpdate = func(runRoot, app, manifestPath string) error {
+	runAsyncUpdate = func(runRoot, app, manifestPath string, opts updateOptions) error {
 		close(done)
 		return fmt.Errorf("boom")
 	}
@@ -398,7 +399,7 @@ func TestExecuteManifestUsageError(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("expected code 1, got %d", code)
 	}
-	if !strings.Contains(errOut.String(), "usage: appstract manifest validate") {
+	if !strings.Contains(errOut.String(), "usage: appstract manifest") {
 		t.Fatalf("unexpected stderr: %s", errOut.String())
 	}
 }
@@ -712,6 +713,62 @@ func TestExecuteUpdateUsesExecutableDirByDefault(t *testing.T) {
 	}
 	if calledRoot != root {
 		t.Fatalf("expected default root %s, got %s", root, calledRoot)
+	}
+}
+
+func TestExecuteUpdateSilentOutput(t *testing.T) {
+	root := t.TempDir()
+	if err := bootstrap.InitLayout(root); err != nil {
+		t.Fatalf("init layout failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "manifests", "a.json"), []byte(runManifestContent("a.exe")), 0o644); err != nil {
+		t.Fatalf("write manifest failed: %v", err)
+	}
+
+	oldUpdate := executeUpdateFromManifest
+	executeUpdateFromManifest = func(updateRoot, app, path string, opts updateOptions) error {
+		return nil
+	}
+	t.Cleanup(func() { executeUpdateFromManifest = oldUpdate })
+
+	var out strings.Builder
+	var errOut strings.Builder
+	code := Execute([]string{"update", "--root", root, "--output", "silent"}, &out, &errOut, "")
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d, err=%s", code, errOut.String())
+	}
+	if strings.TrimSpace(out.String()) != "" {
+		t.Fatalf("expected silent stdout, got: %q", out.String())
+	}
+}
+
+func TestExecuteUpdateDebugOutput(t *testing.T) {
+	root := t.TempDir()
+	if err := bootstrap.InitLayout(root); err != nil {
+		t.Fatalf("init layout failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "manifests", "a.json"), []byte(runManifestContent("a.exe")), 0o644); err != nil {
+		t.Fatalf("write manifest failed: %v", err)
+	}
+
+	oldUpdate := executeUpdateFromManifest
+	executeUpdateFromManifest = func(updateRoot, app, path string, opts updateOptions) error {
+		if opts.Output == nil {
+			t.Fatal("expected output reporter")
+		}
+		opts.Output.onUpdaterMessage(updater.MessageLevelDebug, "debug trace")
+		return nil
+	}
+	t.Cleanup(func() { executeUpdateFromManifest = oldUpdate })
+
+	var out strings.Builder
+	var errOut strings.Builder
+	code := Execute([]string{"update", "--root", root, "--output", "debug"}, &out, &errOut, "")
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d, err=%s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "[debug] debug trace") {
+		t.Fatalf("expected debug trace output, got: %s", out.String())
 	}
 }
 

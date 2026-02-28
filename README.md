@@ -76,6 +76,13 @@ $env:APPSTRACT_HOME = "D:\Appstract"
 .\build\appstract.exe update --root D:\Appstract --checkver --prompt-switch --relaunch --fail-fast
 ```
 
+输出等级控制示例：
+
+```powershell
+.\build\appstract.exe update --root D:\Appstract --output silent
+.\build\appstract.exe update --root D:\Appstract --output debug
+```
+
 ### 6) 清单校验
 
 ```powershell
@@ -93,20 +100,31 @@ $env:APPSTRACT_HOME = "D:\Appstract"
 
 - `help [command]`
   - 显示全量命令或单个命令用法。
-- `init [--root <path>]`
+- `init [--root <path>] [--output <silent|default|debug>]`
   - 初始化目录结构与 `config.yaml`。
-- `add [--root <path>] <manifest-file>`
+- `add [--root <path>] [--output <silent|default|debug>] <manifest-file>`
   - 应用名取清单文件名（如 `chrome.json` -> `chrome`）。
   - 将清单复制到 `manifests/<app>.json`，随后执行安装。
-- `run [--root <path>] <app>`
+- `run [--root <path>] [--output <silent|default|debug>] <app>`
   - 启动 `apps/<app>/current` 对应程序。
   - 缺失 current 且存在对应 manifest 时会自动尝试安装。
-- `update [--root <path>] [--checkver] [--prompt-switch] [--relaunch] [--fail-fast]`
+- `update [--root <path>] [--output <silent|default|debug>] [--checkver] [--prompt-switch] [--relaunch] [--fail-fast]`
   - 仅扫描并更新 `manifests/` 下已存在清单的软件。
   - 默认逐个执行并继续后续应用；若有失败，退出码非 0。
   - `--fail-fast`：遇到第一个失败立即停止。
-- `manifest validate <file>`
+- `manifest [--output <silent|default|debug>] validate <file>`
   - 解析并校验 Manifest 文件。
+
+## 输出等级
+
+- 支持三级输出：`silent`、`default`、`debug`。
+- 默认等级：`default`（关键步骤提示 + 下载进度条）。
+- 长耗时阶段会显示动态点动画（`...` 滚动），完成后显示 `[ok]`。
+- `silent`：仅输出错误，适合脚本静默执行。
+- `debug`：在默认基础上输出更多调试信息（例如下载与提取细节）。
+- 配置方式：
+  - 命令行：`--output <silent|default|debug>`（优先级最高）
+  - 配置文件：`config.yaml` 中设置 `output_level: "default"`（兼容旧 `log_level`）
 
 ## 根目录与初始化规则
 
@@ -114,6 +132,7 @@ $env:APPSTRACT_HOME = "D:\Appstract"
 - `run/add/update` 在执行前会检查目录完整性（`manifests`/`shims`/`scripts`/`apps`）：
   - 若仅缺少部分目录，会自动修复缺失目录。
   - 若目录仅包含程序本体（或等价空目录），会提示先执行 `init`。
+- 版本目录命名使用纯版本号（如 `4.1.26`），不再使用 `v4.1.26` 前缀。
 
 ## 目录结构
 

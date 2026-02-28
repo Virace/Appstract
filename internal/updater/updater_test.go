@@ -56,7 +56,7 @@ func TestUpdateFromManifest_Success(t *testing.T) {
 		t.Fatalf("UpdateFromManifest failed: %v", err)
 	}
 
-	versionPath := filepath.Join(root, "apps", appName, "v1.37.0-1", "aria2c.exe")
+	versionPath := filepath.Join(root, "apps", appName, "1.37.0-1", "aria2c.exe")
 	if _, err := os.Stat(versionPath); err != nil {
 		t.Fatalf("expected extracted binary at %s: %v", versionPath, err)
 	}
@@ -271,7 +271,7 @@ func TestUpdate_DownloadHTTPFailureSetsPkgDownload(t *testing.T) {
 
 func TestDownloadRejectsHTTPURL(t *testing.T) {
 	mgr := NewManager(t.TempDir())
-	err := mgr.download("http://example.com/pkg.zip", filepath.Join(t.TempDir(), "pkg.zip"))
+	err := mgr.download("aria2", "http://example.com/pkg.zip", filepath.Join(t.TempDir(), "pkg.zip"))
 	if err == nil || !strings.Contains(err.Error(), "insecure download url scheme") {
 		t.Fatalf("expected insecure download url error, got: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestUpdate_PreInstallSuccess(t *testing.T) {
 	if err := mgr.Update(appName, man); err != nil {
 		t.Fatalf("Update failed: %v", err)
 	}
-	markerPath := filepath.Join(root, "apps", appName, "v1.37.0-1", "preinstall.txt")
+	markerPath := filepath.Join(root, "apps", appName, "1.37.0-1", "preinstall.txt")
 	if _, err := os.Stat(markerPath); err != nil {
 		t.Fatalf("expected pre_install marker file: %v", err)
 	}
@@ -522,7 +522,7 @@ func TestUpdate_CleanupOldVersions(t *testing.T) {
 	root := t.TempDir()
 	appName := "aria2"
 	appDir := filepath.Join(root, "apps", appName)
-	for _, v := range []string{"v1.0.0", "v1.1.0", "v1.2.0"} {
+	for _, v := range []string{"1.0.0", "1.1.0", "1.2.0"} {
 		path := filepath.Join(appDir, v)
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			t.Fatalf("mkdir %s failed: %v", v, err)
@@ -558,17 +558,17 @@ func TestUpdate_CleanupOldVersions(t *testing.T) {
 		t.Fatalf("Update failed: %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(appDir, "v1.37.0-1")); err != nil {
+	if _, err := os.Stat(filepath.Join(appDir, "1.37.0-1")); err != nil {
 		t.Fatalf("expected current version dir: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(appDir, "v1.2.0")); err != nil {
+	if _, err := os.Stat(filepath.Join(appDir, "1.2.0")); err != nil {
 		t.Fatalf("expected newest old version retained: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(appDir, "v1.1.0")); !os.IsNotExist(err) {
-		t.Fatalf("expected v1.1.0 removed, err=%v", err)
+	if _, err := os.Stat(filepath.Join(appDir, "1.1.0")); !os.IsNotExist(err) {
+		t.Fatalf("expected 1.1.0 removed, err=%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(appDir, "v1.0.0")); !os.IsNotExist(err) {
-		t.Fatalf("expected v1.0.0 removed, err=%v", err)
+	if _, err := os.Stat(filepath.Join(appDir, "1.0.0")); !os.IsNotExist(err) {
+		t.Fatalf("expected 1.0.0 removed, err=%v", err)
 	}
 }
 
@@ -576,15 +576,15 @@ func TestUpdate_NoNewVersionStillCleanupOldVersions(t *testing.T) {
 	root := t.TempDir()
 	appName := "aria2"
 	appDir := filepath.Join(root, "apps", appName)
-	if err := os.MkdirAll(filepath.Join(appDir, "v1.37.0-1"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(appDir, "1.37.0-1"), 0o755); err != nil {
 		t.Fatalf("mkdir current version failed: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(appDir, "v0.9.0"), 0o755); err != nil {
-		t.Fatalf("mkdir v0.9.0 failed: %v", err)
+	if err := os.MkdirAll(filepath.Join(appDir, "0.9.0"), 0o755); err != nil {
+		t.Fatalf("mkdir 0.9.0 failed: %v", err)
 	}
 	time.Sleep(10 * time.Millisecond)
-	if err := os.MkdirAll(filepath.Join(appDir, "v1.0.0"), 0o755); err != nil {
-		t.Fatalf("mkdir v1.0.0 failed: %v", err)
+	if err := os.MkdirAll(filepath.Join(appDir, "1.0.0"), 0o755); err != nil {
+		t.Fatalf("mkdir 1.0.0 failed: %v", err)
 	}
 	state := RuntimeState{CurrentVersion: "1.37.0-1"}
 	stateBytes, _ := json.Marshal(state)
@@ -607,11 +607,11 @@ func TestUpdate_NoNewVersionStillCleanupOldVersions(t *testing.T) {
 	if err := mgr.Update(appName, man); err != nil {
 		t.Fatalf("Update failed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(appDir, "v1.0.0")); err != nil {
+	if _, err := os.Stat(filepath.Join(appDir, "1.0.0")); err != nil {
 		t.Fatalf("expected newest old version retained: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(appDir, "v0.9.0")); !os.IsNotExist(err) {
-		t.Fatalf("expected v0.9.0 removed, err=%v", err)
+	if _, err := os.Stat(filepath.Join(appDir, "0.9.0")); !os.IsNotExist(err) {
+		t.Fatalf("expected 0.9.0 removed, err=%v", err)
 	}
 }
 
@@ -620,7 +620,7 @@ func TestUpdate_RollbackOnRelaunchFailure(t *testing.T) {
 	appName := "aria2"
 	appDir := filepath.Join(root, "apps", appName)
 
-	oldVersionDir := filepath.Join(appDir, "v1.0.0")
+	oldVersionDir := filepath.Join(appDir, "1.0.0")
 	if err := os.MkdirAll(oldVersionDir, 0o755); err != nil {
 		t.Fatalf("mkdir old version failed: %v", err)
 	}
