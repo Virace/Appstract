@@ -767,7 +767,7 @@ func TestExecuteUpdateDebugOutput(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected code 0, got %d, err=%s", code, errOut.String())
 	}
-	if !strings.Contains(out.String(), "[debug] debug trace") {
+	if !strings.Contains(out.String(), "[dbg] debug trace") {
 		t.Fatalf("expected debug trace output, got: %s", out.String())
 	}
 }

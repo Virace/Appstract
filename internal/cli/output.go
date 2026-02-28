@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ type commandOutput struct {
 	level config.OutputLevel
 	out   io.Writer
 	err   io.Writer
+	color bool
 
 	mu             sync.Mutex
 	progressActive bool
@@ -31,6 +33,7 @@ func newCommandOutput(level config.OutputLevel, out io.Writer, err io.Writer) *c
 		level: level,
 		out:   out,
 		err:   err,
+		color: shouldUseColor(out) && shouldUseColor(err),
 	}
 }
 
@@ -38,21 +41,24 @@ func (o *commandOutput) printDefault(format string, args ...any) {
 	if o.level == config.OutputLevelSilent {
 		return
 	}
-	o.writeLine(o.out, format, args...)
+	msg := fmt.Sprintf(format, args...)
+	o.writeLine(o.out, styleMessage(msg, o.color, styleDefault))
 }
 
 func (o *commandOutput) printDebug(format string, args ...any) {
 	if o.level != config.OutputLevelDebug {
 		return
 	}
-	o.writeLine(o.out, format, args...)
+	msg := fmt.Sprintf(format, args...)
+	o.writeLine(o.out, styleMessage("[dbg] "+msg, o.color, styleDebug))
 }
 
 func (o *commandOutput) printError(format string, args ...any) {
-	o.writeLine(o.err, format, args...)
+	msg := fmt.Sprintf(format, args...)
+	o.writeLine(o.err, styleMessage("[err] "+msg, o.color, styleError))
 }
 
-func (o *commandOutput) writeLine(w io.Writer, format string, args ...any) {
+func (o *commandOutput) writeLine(w io.Writer, line string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.stopTaskLocked(true)
@@ -60,7 +66,7 @@ func (o *commandOutput) writeLine(w io.Writer, format string, args ...any) {
 		o.finishInlineLocked(true)
 		o.progressActive = false
 	}
-	fmt.Fprintf(w, format+"\n", args...)
+	fmt.Fprintln(w, line)
 }
 
 func (o *commandOutput) onUpdaterMessage(level updater.MessageLevel, msg string) {
@@ -70,7 +76,7 @@ func (o *commandOutput) onUpdaterMessage(level updater.MessageLevel, msg string)
 	}
 	switch level {
 	case updater.MessageLevelDebug:
-		o.printDebug("[debug] %s", msg)
+		o.printDebug("%s", msg)
 	default:
 		o.printDefault("%s", msg)
 	}
@@ -85,7 +91,7 @@ func (o *commandOutput) onUpdaterProgress(progress updater.DownloadProgress) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.stopTaskLocked(true)
-	o.renderInlineLocked(line)
+	o.renderInlineLocked(line, styleProgress)
 	if progress.Done {
 		o.finishInlineLocked(true)
 		o.progressActive = false
@@ -172,7 +178,7 @@ func (o *commandOutput) startTask(title string) {
 	o.taskActive = true
 	o.taskTitle = strings.TrimSpace(title)
 	o.taskDots = 1
-	o.renderInlineLocked(o.taskTitle + ".")
+	o.renderTaskInlineLocked()
 	ctx, cancel := context.WithCancel(context.Background())
 	o.taskCancel = cancel
 	o.mu.Unlock()
@@ -194,7 +200,7 @@ func (o *commandOutput) startTask(title string) {
 				if o.taskDots > 3 {
 					o.taskDots = 1
 				}
-				o.renderInlineLocked(o.taskTitle + strings.Repeat(".", o.taskDots))
+				o.renderTaskInlineLocked()
 				o.mu.Unlock()
 			}
 		}
@@ -215,12 +221,22 @@ func (o *commandOutput) stopTaskLocked(printNewline bool) {
 	o.finishInlineLocked(printNewline)
 }
 
-func (o *commandOutput) renderInlineLocked(line string) {
-	if o.inlineLen > len(line) {
-		line += strings.Repeat(" ", o.inlineLen-len(line))
+func (o *commandOutput) renderTaskInlineLocked() {
+	frame := spinnerFrames[(o.taskDots-1)%len(spinnerFrames)]
+	line := fmt.Sprintf("[%s] %s%s", frame, o.taskTitle, strings.Repeat(".", o.taskDots))
+	o.renderInlineLocked(line, styleRunning)
+}
+
+func (o *commandOutput) renderInlineLocked(plain string, style styleType) {
+	output := plain
+	if o.inlineLen > len(plain) {
+		output += strings.Repeat(" ", o.inlineLen-len(plain))
 	}
-	fmt.Fprintf(o.out, "\r%s", line)
-	o.inlineLen = len(line)
+	if o.color {
+		output = colorize(output, style)
+	}
+	fmt.Fprintf(o.out, "\r%s", output)
+	o.inlineLen = len(plain)
 }
 
 func (o *commandOutput) finishInlineLocked(printNewline bool) {
@@ -233,4 +249,68 @@ func (o *commandOutput) finishInlineLocked(printNewline bool) {
 		fmt.Fprintf(o.out, "\r%s\r", strings.Repeat(" ", o.inlineLen))
 	}
 	o.inlineLen = 0
+}
+
+type styleType int
+
+const (
+	styleDefault styleType = iota
+	styleSuccess
+	styleError
+	styleDebug
+	styleRunning
+	styleProgress
+)
+
+var spinnerFrames = []string{"|", "/", "-", `\`}
+
+func styleMessage(msg string, useColor bool, fallback styleType) string {
+	if !useColor {
+		return msg
+	}
+	switch {
+	case strings.HasPrefix(msg, "[ok]"):
+		return colorize(msg, styleSuccess)
+	case strings.HasPrefix(msg, "[err]"):
+		return colorize(msg, styleError)
+	case strings.HasPrefix(msg, "[dbg]"):
+		return colorize(msg, styleDebug)
+	default:
+		return colorize(msg, fallback)
+	}
+}
+
+func colorize(msg string, style styleType) string {
+	code := "37" // white
+	switch style {
+	case styleSuccess:
+		code = "32" // green
+	case styleError:
+		code = "31" // red
+	case styleDebug:
+		code = "36" // cyan
+	case styleRunning:
+		code = "33" // yellow
+	case styleProgress:
+		code = "34" // blue
+	}
+	return "\x1b[" + code + "m" + msg + "\x1b[0m"
+}
+
+func shouldUseColor(w io.Writer) bool {
+	if strings.TrimSpace(os.Getenv("NO_COLOR")) != "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("TERM")), "dumb") {
+		return false
+	}
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
