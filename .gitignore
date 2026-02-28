@@ -37,3 +37,4 @@ build/
 build.md
 phase.md
 coverage
+.ai_memory/
