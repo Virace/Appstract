@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"appstract/internal/bootstrap"
@@ -13,6 +14,21 @@ import (
 	"appstract/internal/manifest"
 	"appstract/internal/updater"
 )
+
+var runLaunch = func(path string) error {
+	cmd := exec.Command(path)
+	return cmd.Start()
+}
+
+var runAsyncUpdate = func(root, app, manifestPath string) error {
+	manager := updater.NewManager(root)
+	cfg, err := config.Load(root)
+	if err != nil {
+		return err
+	}
+	manager.KeepVersions = cfg.KeepVersions
+	return manager.UpdateFromManifest(app, manifestPath)
+}
 
 func Execute(args []string, stdout, stderr io.Writer, envHome string) int {
 	if len(args) == 0 {
@@ -82,8 +98,31 @@ func executeRun(args []string, stdout, stderr io.Writer, envHome string) int {
 		return 1
 	}
 
-	// M1 only validates runnable layout; process launch is implemented in M2/M3.
-	fmt.Fprintf(stdout, "run-ready: %s (%s)\n", app, currentPath)
+	manifestPath := filepath.Join(root, "manifests", app+".json")
+	man, err := manifest.ParseFile(manifestPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "load manifest for run: %v\n", err)
+		return 1
+	}
+	binPath := filepath.Join(currentPath, man.Bin)
+	if _, err := os.Stat(binPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(stderr, "app %q bin missing at %s\n", app, binPath)
+			return 1
+		}
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if err := runLaunch(binPath); err != nil {
+		fmt.Fprintf(stderr, "launch app %q failed: %v\n", app, err)
+		return 1
+	}
+	go func() {
+		if err := runAsyncUpdate(root, app, manifestPath); err != nil {
+			fmt.Fprintf(stderr, "background update failed for %q: %v\n", app, err)
+		}
+	}()
+	fmt.Fprintf(stdout, "run-started: %s (%s)\n", app, binPath)
 	return 0
 }
 
